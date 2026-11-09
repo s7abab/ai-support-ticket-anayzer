@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -19,6 +20,36 @@ Read the customer's message and respond with ONLY a JSON object with these keys:
 - "summary": a one-sentence summary of the ticket, at most 300 characters
 Do not include any other text."""
 
+MAX_ATTEMPTS = 3
+RETRY_BASE_DELAY_SECONDS = 0.5
+# Rate limiting and server-side errors are worth retrying; other 4xx are not.
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
+async def _post_with_retries(
+    client: httpx.AsyncClient, url: str, headers: dict, payload: dict
+) -> httpx.Response:
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        is_last = attempt == MAX_ATTEMPTS
+        try:
+            res = await client.post(url, headers=headers, json=payload)
+        except httpx.TimeoutException as exc:
+            if is_last:
+                raise LLMTimeoutError("LLM provider timed out") from exc
+        except httpx.TransportError as exc:
+            if is_last:
+                raise LLMUnavailableError("LLM provider unavailable") from exc
+        else:
+            if res.is_success:
+                return res
+            if res.status_code not in RETRYABLE_STATUS_CODES or is_last:
+                raise LLMUnavailableError("LLM provider unavailable")
+
+        # Exponential backoff: 0.5s, then 1s.
+        await asyncio.sleep(RETRY_BASE_DELAY_SECONDS * 2 ** (attempt - 1))
+
+    raise AssertionError("unreachable")
+
 
 async def analyze_ticket(message: str) -> AnalyzeResponse:
     settings = get_llm_settings()
@@ -34,14 +65,8 @@ async def analyze_ticket(message: str) -> AnalyzeResponse:
         "temperature": 0,
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=settings.timeout_seconds) as client:
-            res = await client.post(settings.api_url, headers=headers, json=payload)
-            res.raise_for_status()
-    except httpx.TimeoutException as exc:
-        raise LLMTimeoutError("LLM provider timed out") from exc
-    except httpx.HTTPError as exc:
-        raise LLMUnavailableError("LLM provider unavailable") from exc
+    async with httpx.AsyncClient(timeout=settings.timeout_seconds) as client:
+        res = await _post_with_retries(client, settings.api_url, headers, payload)
 
     try:
         content = res.json()["choices"][0]["message"]["content"]
