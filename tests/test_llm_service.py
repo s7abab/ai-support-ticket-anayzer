@@ -128,7 +128,8 @@ def test_valid_request_is_forwarded_to_provider_correctly(client, provider, slee
     assert request.headers["Authorization"] == f"Bearer {API_KEY}"
     body = json.loads(request.content)
     assert body["model"] == MODEL
-    assert body["response_format"] == {"type": "json_object"}
+    assert body["response_format"]["type"] == "json_schema"
+    assert body["response_format"]["json_schema"]["strict"] is True
     assert body["messages"][0]["role"] == "system"
     assert body["messages"][-1] == {"role": "user", "content": "I was billed twice this month!"}
 
@@ -291,3 +292,107 @@ def test_malformed_provider_output_returns_controlled_502(
     assert provider.attempts == 1
     assert sleeps == []
     assert "oops" not in res.text
+
+
+# --- Provider output fails the response contract ----------------------------
+
+
+def _without(key: str) -> dict:
+    return {k: v for k, v in VALID_ANALYSIS.items() if k != key}
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        # Required fields must be present.
+        *[pytest.param(_without(f), id=f"missing-{f}") for f in VALID_ANALYSIS],
+        # Categories, priorities and sentiments come from fixed allowed values.
+        pytest.param({**VALID_ANALYSIS, "priority": "urgent"}, id="priority-not-allowed"),
+        pytest.param({**VALID_ANALYSIS, "sentiment": "angry"}, id="sentiment-not-allowed"),
+        pytest.param({**VALID_ANALYSIS, "category": "Billing"}, id="category-wrong-case"),
+        # Summaries have sensible length limits.
+        pytest.param({**VALID_ANALYSIS, "summary": ""}, id="summary-empty"),
+        pytest.param({**VALID_ANALYSIS, "summary": "   "}, id="summary-whitespace-only"),
+        pytest.param({**VALID_ANALYSIS, "summary": "x" * 301}, id="summary-too-long"),
+        # Unexpected fields are rejected, not silently dropped.
+        pytest.param({**VALID_ANALYSIS, "confidence": 0.9}, id="extra-field"),
+        # Wrong types are rejected rather than coerced.
+        pytest.param({**VALID_ANALYSIS, "summary": 123}, id="summary-is-number"),
+        pytest.param({**VALID_ANALYSIS, "priority": 1}, id="priority-is-number"),
+        pytest.param({**VALID_ANALYSIS, "category": None}, id="category-is-null"),
+        pytest.param({**VALID_ANALYSIS, "summary": ["a", "b"]}, id="summary-is-list"),
+        # The content must be a JSON object at all.
+        pytest.param([VALID_ANALYSIS], id="content-is-array"),
+        pytest.param("billing", id="content-is-string"),
+    ],
+)
+def test_provider_output_violating_contract_returns_controlled_502(
+    client, provider, sleeps, content
+):
+    provider.script(completion(json.dumps(content)))
+
+    res = analyze(client)
+
+    assert res.status_code == 502
+    assert res.json() == {
+        "error": {
+            "code": "provider_invalid_response",
+            "message": "The analysis provider returned an invalid response.",
+        }
+    }
+    assert provider.attempts == 1
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        pytest.param({"content": None}, id="content-null"),
+        pytest.param({"content": VALID_ANALYSIS}, id="content-already-object"),
+        pytest.param({}, id="content-missing"),
+    ],
+)
+def test_provider_message_without_string_content_returns_502(client, provider, sleeps, message):
+    provider.script(httpx.Response(200, json={"choices": [{"message": message}]}))
+
+    res = analyze(client)
+
+    assert res.status_code == 502
+    assert res.json()["error"]["code"] == "provider_invalid_response"
+
+
+def test_summary_at_limit_is_accepted_and_whitespace_trimmed(client, provider, sleeps):
+    summary = "x" * 300
+    provider.script(completion(json.dumps({**VALID_ANALYSIS, "summary": f"  {summary}\n"})))
+
+    res = analyze(client)
+
+    assert res.status_code == 200
+    assert res.json()["summary"] == summary
+
+
+def test_provider_is_sent_strict_schema_matching_response_contract(client, provider, sleeps):
+    provider.script(completion(json.dumps(VALID_ANALYSIS)))
+
+    analyze(client)
+
+    json_schema = json.loads(provider.requests[0].content)["response_format"]["json_schema"]
+    assert json_schema["name"] == "ticket_analysis"
+    assert json_schema["strict"] is True
+    schema = json_schema["schema"]
+    # Strict mode requires every field and no extra keys.
+    assert schema["additionalProperties"] is False
+    assert sorted(schema["required"]) == sorted(VALID_ANALYSIS)
+    assert schema["properties"]["category"]["enum"] == ["billing", "technical", "account", "general"]
+    assert schema["properties"]["priority"]["enum"] == ["low", "medium", "high"]
+    assert schema["properties"]["sentiment"]["enum"] == ["positive", "neutral", "negative"]
+    # Length keywords are removed for strict mode; validation still enforces them.
+    assert "maxLength" not in schema["properties"]["summary"]
+    assert "minLength" not in schema["properties"]["summary"]
+
+
+def test_strict_schema_does_not_mutate_public_response_schema():
+    from app.schemas import AnalyzeResponse
+
+    summary = AnalyzeResponse.model_json_schema()["properties"]["summary"]
+    assert summary["maxLength"] == 300
+    assert summary["minLength"] == 1

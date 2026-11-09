@@ -20,6 +20,29 @@ Read the customer's message and respond with ONLY a JSON object with these keys:
 - "summary": a one-sentence summary of the ticket, at most 300 characters
 Do not include any other text."""
 
+# String length keywords are not supported by strict structured outputs, so they
+# are removed from the schema sent to the provider. The summary length limit is
+# still enforced when the response is validated against AnalyzeResponse.
+_UNSUPPORTED_STRICT_KEYWORDS = {"minLength", "maxLength"}
+
+
+def _strict_response_schema() -> dict:
+    schema = AnalyzeResponse.model_json_schema()
+    for prop in schema["properties"].values():
+        for keyword in _UNSUPPORTED_STRICT_KEYWORDS:
+            prop.pop(keyword, None)
+    return schema
+
+
+RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "ticket_analysis",
+        "strict": True,
+        "schema": _strict_response_schema(),
+    },
+}
+
 MAX_ATTEMPTS = 3
 RETRY_BASE_DELAY_SECONDS = 1.0
 # Rate limiting and server-side errors are worth retrying; other 4xx are not.
@@ -61,15 +84,30 @@ async def analyze_ticket(message: str) -> AnalyzeResponse:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": message},
         ],
-        "response_format": {"type": "json_object"},
+        "response_format": RESPONSE_FORMAT,
         "temperature": 0,
     }
 
     async with httpx.AsyncClient(timeout=settings.timeout_seconds) as client:
         res = await _post_with_retries(client, settings.api_url, headers, payload)
 
+    return _validate_analysis(_parse_content(res))
+
+
+def _parse_content(res: httpx.Response) -> object:
+    """Parse: extract the model's message from the completion and decode it as JSON."""
     try:
         content = res.json()["choices"][0]["message"]["content"]
-        return AnalyzeResponse.model_validate(json.loads(content))
-    except (KeyError, IndexError, TypeError, ValueError, ValidationError) as exc:
-        raise LLMInvalidResponseError("LLM provider returned invalid output") from exc
+        if not isinstance(content, str):
+            raise TypeError("message content is not a string")
+        return json.loads(content)
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise LLMInvalidResponseError("LLM provider returned unparseable output") from exc
+
+
+def _validate_analysis(data: object) -> AnalyzeResponse:
+    """Validate: check the decoded JSON against the response contract."""
+    try:
+        return AnalyzeResponse.model_validate(data)
+    except ValidationError as exc:
+        raise LLMInvalidResponseError("LLM provider output failed validation") from exc

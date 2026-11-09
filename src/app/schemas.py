@@ -1,5 +1,5 @@
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal
 
 
@@ -11,6 +11,12 @@ class AnalyzeRequest(BaseModel):
 
 
 class AnalyzeResponse(BaseModel):
+    # Provider output is untrusted: reject keys outside the contract instead of
+    # silently dropping them, and reject wrong types instead of coercing them
+    # (e.g. a numeric or boolean value where a string is expected). Surrounding
+    # whitespace is stripped before length checks, so "   " is not a summary.
+    model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
+
     category: Literal[
         "billing",
         "technical",
