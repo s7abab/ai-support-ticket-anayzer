@@ -31,6 +31,21 @@ priority (`low`, `medium`, or `high`), sentiment (`positive`, `neutral`, or
 return 422; provider timeouts, availability problems, and invalid output return
 504, 503, and 502 respectively.
 
+Every error uses the same shape, with a stable `code` and a client-safe
+`message`. Validation errors also list the failing `fields`:
+
+```json
+{"error": {"code": "provider_timeout", "message": "The analysis provider timed out."}}
+```
+
+| Status | Code |
+|---|---|
+| 422 | `invalid_request` |
+| 502 | `provider_invalid_response` |
+| 503 | `provider_unavailable`, `service_misconfigured` |
+| 504 | `provider_timeout` |
+| 500 | `internal_error` |
+
 ## Tests
 
 ```sh
