@@ -3,8 +3,8 @@ from fastapi import FastAPI, HTTPException
 from app.exceptions import (
     LLMConfigError,
     LLMInvalidResponseError,
-    LLMTimeoutError,
-    LLMUnavailableError,
+    ProviderTimeoutError,
+    ProviderUnavailableError,
 )
 from app.schemas import AnalyzeRequest, AnalyzeResponse
 from app.services import llm_service
@@ -23,9 +23,9 @@ async def analyze_ticket(request: AnalyzeRequest) -> AnalyzeResponse:
         return await llm_service.analyze_ticket(request.message)
     except LLMConfigError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
-    except LLMTimeoutError as exc:
+    except ProviderTimeoutError as exc:
         raise HTTPException(status_code=504, detail=str(exc))
-    except LLMUnavailableError as exc:
+    except ProviderUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except LLMInvalidResponseError as exc:
         raise HTTPException(status_code=502, detail=str(exc))

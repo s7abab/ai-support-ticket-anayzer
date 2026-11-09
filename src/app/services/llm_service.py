@@ -7,8 +7,8 @@ from pydantic import ValidationError
 from app.config import get_llm_settings
 from app.exceptions import (
     LLMInvalidResponseError,
-    LLMTimeoutError,
-    LLMUnavailableError,
+    ProviderTimeoutError,
+    ProviderUnavailableError,
 )
 from app.schemas import AnalyzeResponse
 
@@ -35,15 +35,15 @@ async def _post_with_retries(
             res = await client.post(url, headers=headers, json=payload)
         except httpx.TimeoutException as exc:
             if is_last:
-                raise LLMTimeoutError("LLM provider timed out") from exc
+                raise ProviderTimeoutError("LLM provider timed out") from exc
         except httpx.TransportError as exc:
             if is_last:
-                raise LLMUnavailableError("LLM provider unavailable") from exc
+                raise ProviderUnavailableError("LLM provider unavailable") from exc
         else:
             if res.is_success:
                 return res
             if res.status_code not in RETRYABLE_STATUS_CODES or is_last:
-                raise LLMUnavailableError("LLM provider unavailable")
+                raise ProviderUnavailableError("LLM provider unavailable")
 
         # Exponential backoff: 1s, then 2s.
         await asyncio.sleep(RETRY_BASE_DELAY_SECONDS * 2 ** (attempt - 1))
