@@ -21,7 +21,7 @@ Read the customer's message and respond with ONLY a JSON object with these keys:
 Do not include any other text."""
 
 MAX_ATTEMPTS = 3
-RETRY_BASE_DELAY_SECONDS = 0.5
+RETRY_BASE_DELAY_SECONDS = 1.0
 # Rate limiting and server-side errors are worth retrying; other 4xx are not.
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
@@ -45,7 +45,7 @@ async def _post_with_retries(
             if res.status_code not in RETRYABLE_STATUS_CODES or is_last:
                 raise LLMUnavailableError("LLM provider unavailable")
 
-        # Exponential backoff: 0.5s, then 1s.
+        # Exponential backoff: 1s, then 2s.
         await asyncio.sleep(RETRY_BASE_DELAY_SECONDS * 2 ** (attempt - 1))
 
     raise AssertionError("unreachable")
